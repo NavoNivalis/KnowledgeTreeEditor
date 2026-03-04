@@ -8,7 +8,7 @@
     "noEmit": true,
     "esModuleInterop": true,
     "module": "esnext",
-    "moduleResolution": "bundler",
+    "moduleResolution": "bundler", // Next.js 14+ 默认值，无需改
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
@@ -24,11 +24,12 @@
   },
   "include": [
     "next-env.d.ts",
+    "types/**/*", // 新增这一行，识别 types 文件夹
     "**/*.ts",
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
     "**/*.mts"
-  ],
+, "app/components/NotebookEditor.jsx"  ],
   "exclude": ["node_modules"]
 }

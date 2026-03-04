@@ -24,3 +24,9 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* app/globals.css */
+/* 隐藏 React Flow 右下角水印 */
+.react-flow__attribution {
+  display: none !important;
+}
