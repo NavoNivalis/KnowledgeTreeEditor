@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import ReactFlow, {
   ReactFlowProvider,
@@ -29,10 +31,12 @@ import {
   deleteNoteByNodeId,
 } from '../hooks/database'; // 路径匹配你的文件结构
 
-import { useRouter } from 'next/navigation';
 import { TreeDeciduousIcon } from 'lucide-react';
 import { init } from 'next/dist/compiled/webpack/webpack';
 
+import NotebookEditor from './NotebookEditor';
+
+import { useRouter } from 'next/navigation';
 
 
 
@@ -196,17 +200,24 @@ const TreeNodeComponent: React.FC<NodeProps> = ({ data, id }) => {
   const [label, setLabel] = useState(data.label);
   const [editing, setEditing] = useState(false);
   const updateNodeInternals = useUpdateNodeInternals();
-  
+
+  // 同步外部更新
+  useEffect(() => {
+    setLabel(data.label);
+  }, [data.label]);
+
   const handleConfirm = () => {
     if (label.trim()) {
-      window.dispatchEvent(new CustomEvent('nodeLabelUpdated', { 
-        detail: { nodeId: id, label: label.trim() } 
-      }));
+      window.dispatchEvent(
+        new CustomEvent('nodeLabelUpdated', {
+          detail: { nodeId: id, label: label.trim() },
+        })
+      );
     }
     setEditing(false);
     updateNodeInternals(id);
   };
-  
+
   return (
     <div
       style={{
@@ -229,53 +240,53 @@ const TreeNodeComponent: React.FC<NodeProps> = ({ data, id }) => {
         type="source"
         position={Position.Top}
         id="top-source"
-        style={{ 
+        style={{
           background: '#666',
           width: 8,
           height: 8,
           top: -4,
           left: '50%',
-          transform: 'translateX(-50%)'
+          transform: 'translateX(-50%)',
         }}
         isConnectable={true}
       />
-      
+
       <Handle
         type="target"
         position={Position.Left}
         id="left-target"
-        style={{ 
+        style={{
           background: '#FF6B6B',
           width: 8,
           height: 8,
           left: -4,
           top: '50%',
-          transform: 'translateY(-50%)'
+          transform: 'translateY(-50%)',
         }}
         isConnectable={true}
       />
-      
+
       <Handle
         type="target"
         position={Position.Right}
         id="right-target"
-        style={{ 
+        style={{
           background: '#4ECDC4',
           width: 8,
           height: 8,
           right: -4,
           top: '50%',
-          transform: 'translateY(-50%)'
+          transform: 'translateY(-50%)',
         }}
         isConnectable={true}
       />
-      
+
       {editing ? (
         <input
           value={label}
-          onChange={e => setLabel(e.target.value)}
+          onChange={(e) => setLabel(e.target.value)}
           onBlur={handleConfirm}
-          onKeyDown={e => e.key === 'Enter' && handleConfirm()}
+          onKeyDown={(e) => e.key === 'Enter' && handleConfirm()}
           autoFocus
           style={{
             width: '100%',
@@ -288,31 +299,33 @@ const TreeNodeComponent: React.FC<NodeProps> = ({ data, id }) => {
           }}
         />
       ) : (
-        <div 
-          style={{ 
-            cursor: 'pointer', 
-            width: '100%', 
+        <div
+          style={{
+            cursor: 'pointer',
+            width: '100%',
             textAlign: 'center',
             padding: '0 4px',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
           }}
-          onDoubleClick={() => setEditing(true)}
+          onDoubleClick={() => setEditing(true)} // 👈 双击进入编辑
           title={label}
         >
-          {label} <br/> 
+          {label} <br />
           <small>order:{data.order}</small>
         </div>
       )}
-      
-      <div style={{
-        position: 'absolute',
-        top: -20,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        fontSize: 10,
-        color: '#666',
-      }}>
+
+      <div
+        style={{
+          position: 'absolute',
+          top: -20,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          fontSize: 10,
+          color: '#666',
+        }}
+      >
         L{data.level}-{data.branch[0]}
       </div>
     </div>
@@ -400,6 +413,9 @@ const KnowledgeTreeEditor: React.FC = () => {
   const [treeData, setTreeData] = useState<TreeNode[]>([]); 
   // 原有状态不变，新增：
   const [treeId, setTreeId] = useState<string>(''); // 认知树ID
+
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
   const [loading, setLoading] = useState<boolean>(false); // 加载/保存状态
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -411,6 +427,12 @@ const KnowledgeTreeEditor: React.FC = () => {
     nodeId: string | null;
   }>({ show: false, x: 0, y: 0, nodeId: null });
 
+    const router = useRouter();
+
+    // 删掉 useCallback，直接用普通函数
+    const onNodeClick = (_: any, node: any) => {
+      setSelectedNodeId(node.id);
+    };
 
     const updateTree = useCallback(async (newTree: TreeNode[]) => {
       const laidOut = layoutTree(newTree);
@@ -591,129 +613,86 @@ const KnowledgeTreeEditor: React.FC = () => {
         window.addEventListener('nodeLabelUpdated', listener);
         return () => window.removeEventListener('nodeLabelUpdated', listener);
       }, [treeData, updateTree]);
-  
+ 
   //注册reactflow自定义节点
   const nodeTypes = useMemo(() => ({ treeNode: TreeNodeComponent }), []);
   
-  return (
-    <ReactFlowProvider>
-      <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onNodeContextMenu={handleNodeContextMenu}
-          nodeTypes={nodeTypes}
-          fitView
-          onInit={handleInit}
-          style={{ background: '#f8f9fa' }}
-        >
-          <Background color="#e9ecef" gap={20}  />
-          <Controls />
-          <MiniMap
-              nodeColor={(node) => {
-                // 自定义小地图节点颜色（可选，按分支区分）
-                return node.data.branch === 'left' ? '#4285F4' : '#34A853';
-              }}
-              nodeStrokeWidth={2}
-              style={{ 
-                position: 'absolute', 
-                bottom: 16, 
-                right: 16, 
-                width: 200, 
-                height: 150,
-                borderRadius: 8,
-                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-              }}
-          />  
-        </ReactFlow>
-        
-        {contextMenu.show && (
-          <div
-            style={{
+    return (
+      <div style={{
+        display: 'flex',
+        width: '100%',
+        height: '100%',
+        gap: '8px',
+        padding: '8px',
+        boxSizing: 'border-box'
+      }}>
+
+        {/* ------------- 左侧树：固定宽度，不占全屏 ------------- */}
+        <div style={{
+          width: '800px',
+          height: '100%',
+          background: 'white',
+          borderRadius: '8px',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+          position: 'relative',
+          overflow: 'hidden'
+        }}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onNodeClick={onNodeClick}
+            onNodeContextMenu={handleNodeContextMenu}
+            nodeTypes={nodeTypes}
+            fitView
+            onInit={handleInit}
+            style={{ 
+              width: '100%', 
+              height: '100%', 
+              backgroundColor: '#f9fafb' 
+            }}
+          >
+            <Background />
+            <Controls />
+            <MiniMap />
+          </ReactFlow>
+
+          {contextMenu.show && (
+            <div style={{
               position: 'fixed',
               top: contextMenu.y,
               left: contextMenu.x,
               background: 'white',
-              borderRadius: 4,
               boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-              padding: '8px 0',
+              borderRadius: 6,
               zIndex: 9999,
-              minWidth: 120,
-            }}
-          >
-            <div
-              style={{ padding: '8px 16px', cursor: 'pointer' }}
-              onClick={handleAddChildNode}
-              onMouseEnter={e => e.currentTarget.style.background = '#f5f5f5'}
-              onMouseLeave={e => e.currentTarget.style.background = 'white'}
-            >
-              新增子节点
+              minWidth: 130
+            }}>
+              <div style={{ padding: '8px 12px', cursor: 'pointer' }} onClick={handleAddChildNode}>
+                新增子节点
+              </div>
+              <div style={{ padding: '8px 12px', cursor: 'pointer', color: 'red', borderTop: '1px solid #eee' }} onClick={handleDeleteNode}>
+                删除节点
+              </div>
             </div>
-            <div
-              style={{ 
-                padding: '8px 16px', 
-                cursor: 'pointer',
-                color: '#ff4444',
-                borderTop: '1px solid #eee',
-              }}
-              onClick={handleDeleteNode}
-              onMouseEnter={e => e.currentTarget.style.background = '#f5f5f5'}
-              onMouseLeave={e => e.currentTarget.style.background = 'white'}
-            >
-              删除节点
-            </div>
-          </div>
-        )}
-
-                // 在主组件return的div中，新增保存按钮（放在contextMenu下方）：
-        {/* 保存按钮 */}
-        <div style={{
-          position: 'absolute',
-          top: 10,
-          right: 10,
-          zIndex: 5,
-        }}>
-          <button
-            onClick={handleSaveTree}
-            disabled={loading}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: loading ? '#ccc' : '#4285F4',
-              color: 'white',
-              border: 'none',
-              borderRadius: 4,
-              cursor: loading ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {loading ? '保存中...' : '保存认知树'}
-          </button>
+          )}
         </div>
-        
+
+        {/* ------------- 右侧笔记：自动占满剩余空间 ------------- */}
         <div style={{
-          position: 'absolute',
-          top: 10,
-          left: 10,
+          flex: 1,
+          height: '100%',
           background: 'white',
-          padding: 12,
-          borderRadius: 6,
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-          zIndex: 5,
-          fontSize: 13,
-          maxWidth: 300,
+          borderRadius: '8px',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+          overflow: 'auto',
+          padding: '16px'
         }}>
-          <div><strong>✅ 认知树笔记本</strong></div>
-          <div style={{ marginTop: 8 }}>
-            1.这不是传统的笔记本，这是认知构建工具<br/>
-            2. 结构：领域 -》 认知节点 -》 笔记<br/>
-            3. 解决知识越存越乱，找不到关联，找不到重点，复习成本极高，无法形成体系的困难<br/>
-            4. 马斯克：把知识看成一棵树，理解即是记忆，增加10倍记忆，增加跨领域创造能力
-          </div>
+          <NotebookEditor nodeId={selectedNodeId} />
         </div>
       </div>
-    </ReactFlowProvider>
-  );
-};
-
+    );
+}
+// 最后：只导出组件，不要包任何 Provider！
 export default KnowledgeTreeEditor;

@@ -123,7 +123,7 @@ export const loadTreeNodes = async (treeId: string): Promise<TreeNode[]> => {
     label: node.label,
     level: node.level,
     order: node.order,
-    parentId: node.parent_id,
+    parentId: node.parentId,
     branch: node.branch,
     x: node.x,
     y: node.y,
@@ -200,4 +200,46 @@ export const deleteNoteByNodeId = async (nodeId: string) => {
     .eq('node_id', nodeId);
 
   if (error) throw error;
+};
+
+// 根据 nodeId 获取笔记
+export const getNoteByNodeId = async (nodeId: string) => {
+  const { data, error } = await supabase
+    .from('notes')
+    .select('*')
+    .eq('node_id', nodeId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+};
+
+// 保存笔记（存在则更新，不存在则插入）
+export const saveNote = async (nodeId: string, title: string, content: string) => {
+  const existing = await getNoteByNodeId(nodeId);
+
+  if (existing) {
+    // 更新
+    const { error } = await supabase
+      .from('notes')
+      .update({ title, content })
+      .eq('node_id', nodeId);
+
+    if (error) throw error;
+    return true;
+  } else {
+    // 新增
+    const { error } = await supabase
+      .from('notes')
+      .insert([
+        {
+          node_id: nodeId,
+          title,
+          content
+        }
+      ]);
+
+    if (error) throw error;
+    return true;
+  }
 };
