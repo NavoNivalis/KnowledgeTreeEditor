@@ -1,416 +1,716 @@
-'use client'; // Next.js 客户端组件标识（必须加）
-import React, { useState, useCallback, useEffect, useRef } from 'react'; // 仅新增 useRef
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import ReactFlow, {
   ReactFlowProvider,
   useNodesState,
   useEdgesState,
   Controls,
   Background,
+  MiniMap,
   Node,
   Edge,
-  OnNodeClick,
   OnNodeContextMenu,
   NodeProps,
-  ReactFlowInstance, // 仅新增实例类型
-  Handle, 
+  ReactFlowInstance,
+  Handle,
   Position,
+  useUpdateNodeInternals,
 } from 'reactflow';
-// 移除 useReactFlow 引入（这是报错根源）
+
 import 'reactflow/dist/style.css';
 
-// 定义树形数据接口
-interface TreeItem {
-  id: string | number;
-  name: string;
-  children?: TreeItem[];
-}
+import { 
+  TreeNode,
+  getOrCreateDefaultTree,
+  saveTreeNodes,
+  loadTreeNodes,
+  updateNodeLabel,
 
-// 定义构建函数返回值接口
-interface BuildTreeResult {
-  nodes: Node[];
-  edges: Edge[];
-}
+  createNote,
+  deleteNoteByNodeId,
+} from '../hooks/database'; // 路径匹配你的文件结构
 
-// 右键菜单状态接口
-interface ContextMenuState {
-  show: boolean;
-  x: number;
-  y: number;
-  nodeId: string | null;
-}
+import { useRouter } from 'next/navigation';
+import { TreeDeciduousIcon } from 'lucide-react';
+import { init } from 'next/dist/compiled/webpack/webpack';
 
-// 递归构建节点和边的函数（完全保留你的代码）
-const buildTreeNodes = (
-  treeData: unknown,
-  parentId: string | null = null,
-  x: number = 400,
-  y: number = 50,
-  level: number = 0
-): BuildTreeResult => {
-  const validTreeData: TreeItem[] = Array.isArray(treeData)
-    ? treeData.filter(item => item && typeof item === 'object' && 'id' in item && 'name' in item)
-    : [];
 
-  const nodes: Node[] = [];
-  const edges: Edge[] = [];
-  
-  validTreeData.forEach((item, index) => {
-    const nodeId = `node-${String(item.id)}`;
-    
-    const node: Node = {
-      id: nodeId,
-      type: 'default',
-      data: { label: item.name },
-      position: { 
-        x: x + (index - validTreeData.length / 2) * 150,
-        y: y + level * 100 
-      },
-      style: {
-        backgroundColor: ['#4285F4', '#34A853', '#FBBC05'][Math.min(level, 2)],
-        color: level < 2 ? 'white' : 'black',
-        borderRadius: '8px',
-        padding: '10px 15px',
-        border: 'none'
-      },
-      draggable: false,
-    };
-    
-    nodes.push(node);
-    
-    if (parentId) {
-      const edge: Edge = {
-        id: `edge-${parentId}-${nodeId}`,
-        source: parentId,
-        target: nodeId,
-        type: 'smoothstep',
-        style: { stroke: '#666', strokeWidth: 2 }
-      };
-      edges.push(edge);
-    }
-    
-    if (item.children && Array.isArray(item.children) && item.children.length > 0) {
-      const { nodes: childNodes, edges: childEdges } = buildTreeNodes(
-        item.children, 
-        nodeId, 
-        x, 
-        y, 
-        level + 1
-      );
-      nodes.push(...childNodes);
-      edges.push(...childEdges);
-    }
-  });
-  
-  return { nodes, edges };
+
+
+
+
+const CONFIG = {
+  rootX: 500,
+  rootY: 700,         // 仅根节点需要基准Y
+  nodeWidth: 100,
+  nodeHeight: 50,
+  levelGap: 50,       // 有子节点时的偏移量（父子间距）
+  siblingGap: 50,     // 叶子节点的偏移量（兄弟间距）
+  branchGap: 150,
 };
 
-// 自定义可编辑节点组件（完全保留你的代码）
-const EditableNode: React.FC<NodeProps> = ({ data, id }) => {
-  const [inputValue, setInputValue] = useState(data.label || '新节点');
-  const [isEditing, setIsEditing] = useState(true);
 
+
+// ========== 核心：单递归函数（实时累加游标 + 仅根节点基准Y） ========== 简单暴力正确好用
+interface GlobalCursor {
+  left: number;   // 左分支全局累计游标（仅基于根节点基准Y）
+  right: number;  // 右分支全局累计游标
+}
+
+function layoutTreeRecursive(
+  node: TreeNode,
+  treeData: TreeNode[],
+  globalCursor: GlobalCursor,
+  rootBaseY: number // 仅传递根节点基准Y，所有节点都基于这个值计算
+): void {
+  // 1. 分离当前节点的左右分支子节点（按order降序）
+  const leftChildren = treeData
+    .filter(n => n.parentId === node.id && n.branch === 'left')
+    .sort((a, b) => b.order - a.order);
+
+  const rightChildren = treeData
+    .filter(n => n.parentId === node.id && n.branch === 'right')
+    .sort((a, b) => b.order - a.order);
+
+  // 2. 处理左分支（核心：实时累加游标）
+  leftChildren.forEach((child) => {
+    // ① 计算当前子节点的y值（仅根节点基准Y + 左游标）
+    child.y = rootBaseY + globalCursor.left;
+    child.x = node.x - CONFIG.branchGap;
+
+    // ② 判断当前子节点是否有子节点
+    const hasChild = treeData.some(
+      n => n.parentId === child.id && n.branch === child.branch
+    );
+
+    // ③ 递归深入：先处理子节点的子节点（游标先累加）
+    if (hasChild) {
+      // 有子节点 → 游标先减levelGap（父子间距）
+      globalCursor.left -= CONFIG.levelGap;
+      layoutTreeRecursive(child, treeData, globalCursor, rootBaseY);
+    } else {
+      // 叶子节点 → 游标减siblingGap（兄弟间距）
+      globalCursor.left -= CONFIG.siblingGap;
+    }
+  });
+
+  // 3. 处理右分支（逻辑和左分支完全一致）
+  rightChildren.forEach((child) => {
+    // ① 计算当前子节点的y值（仅根节点基准Y + 右游标）
+    child.y = rootBaseY + globalCursor.right;
+    child.x = node.x + CONFIG.branchGap;
+
+    // ② 判断当前子节点是否有子节点
+    const hasChild = treeData.some(
+      n => n.parentId === child.id && n.branch === child.branch
+    );
+
+    // ③ 递归深入：实时累加游标
+    if (hasChild) {
+      globalCursor.right -= CONFIG.levelGap;
+      layoutTreeRecursive(child, treeData, globalCursor, rootBaseY);
+    } else {
+      globalCursor.right -= CONFIG.siblingGap;
+    }
+  });
+}
+
+// ========== 主布局函数（初始化根节点+游标） ==========
+function layoutTree(treeData: TreeNode[]): TreeNode[] {
+  const result = [...treeData];
+  const rootNode = result.find(n => n.level === 0);
+
+  if (rootNode) {
+    // 仅初始化根节点的坐标
+    rootNode.x = CONFIG.rootX;
+    rootNode.y = CONFIG.rootY;
+
+    // 初始化全局游标（仅基于根节点基准Y，初始偏移=-levelGap）
+    const globalCursor: GlobalCursor = {
+      left: -CONFIG.levelGap,
+      right: -CONFIG.levelGap,
+    };
+
+    // 递归布局：仅传递根节点基准Y（所有节点都基于这个值计算）
+    layoutTreeRecursive(rootNode, result, globalCursor, CONFIG.rootY);
+  }
+
+  return result;
+}
+
+// ========== 转换函数 ==========
+function treeToNodes(tree: TreeNode[]): Node[] {
+  return tree.map(node => ({
+    id: node.id,
+    type: 'treeNode',
+    data: { 
+      label: node.label, 
+      level: node.level, 
+      branch: node.branch,
+      parentId: node.parentId,
+      order: node.order
+    },
+    position: { x: node.x, y: node.y },
+    draggable: false,
+    style: {
+      width: CONFIG.nodeWidth,
+      height: CONFIG.nodeHeight,
+    },
+  }));
+}
+
+function treeToEdges(tree: TreeNode[]): Edge[] {
+  const edges: Edge[] = [];
+
+  tree.forEach(node => {
+    if (!node.parentId) return;
+    const parent = tree.find(n => n.id === node.parentId);
+    if (!parent) return;
+
+    const targetHandle = node.branch === 'left' ? 'right-target' : 'left-target';
+
+    edges.push({
+      id: `edge-${parent.id}-${node.id}`,
+      source: parent.id,
+      sourceHandle: 'top-source',
+      target: node.id,
+      targetHandle: targetHandle,
+      type: 'bezier', // 核心：改为贝塞尔曲线（真正的曲线）
+      style: {
+        stroke: node.branch === 'left' ? '#4285F4' : '#34A853',
+        strokeWidth: 2,
+        strokeLinecap: 'round', // 线条端点圆润
+      },
+      // 可选：自定义贝塞尔曲线曲率
+      //bezierOptions: {
+       // curvature: 0.8, // 曲率（0-1，越大曲线越明显）
+       // offset: 50, // 偏移量
+      //},
+    });
+  });
+
+  return edges;
+}
+
+// ========== 自定义节点组件 ==========
+const TreeNodeComponent: React.FC<NodeProps> = ({ data, id }) => {
+  const [label, setLabel] = useState(data.label);
+  const [editing, setEditing] = useState(false);
+  const updateNodeInternals = useUpdateNodeInternals();
+  
   const handleConfirm = () => {
-    if (!inputValue.trim()) return;
-    setIsEditing(false);
-    window.dispatchEvent(
-      new CustomEvent('nodeNameUpdated', { detail: { nodeId: id, name: inputValue.trim() } })
-    );  
+    if (label.trim()) {
+      window.dispatchEvent(new CustomEvent('nodeLabelUpdated', { 
+        detail: { nodeId: id, label: label.trim() } 
+      }));
+    }
+    setEditing(false);
+    updateNodeInternals(id);
   };
-
-  if (isEditing) {
-    return (
-      <div 
-        style={{
-          backgroundColor: '#FBBC05',
-          color: 'black',
-          borderRadius: '8px',
-          padding: '10px 15px',
-          border: '2px solid #d97706',
-          position: 'relative', // ✅ 新增：锚点需要相对定位
+  
+  return (
+    <div
+      style={{
+        width: CONFIG.nodeWidth,
+        height: CONFIG.nodeHeight,
+        backgroundColor: data.branch === 'left' ? '#4285F4' : '#34A853',
+        color: 'white',
+        borderRadius: 8,
+        padding: 8,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 14,
+        boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+        position: 'relative',
+        border: data.order === 0 ? '2px solid #fff' : '1px solid #eee',
+      }}
+    >
+      <Handle
+        type="source"
+        position={Position.Top}
+        id="top-source"
+        style={{ 
+          background: '#666',
+          width: 8,
+          height: 8,
+          top: -4,
+          left: '50%',
+          transform: 'translateX(-50%)'
         }}
-      >
-        {/* ✅ 新增：顶部输入锚点（子节点的输入点，接父节点的边） */}
-        <Handle
-          type="target" // 输入锚点（边的终点）
-          position={Position.Top} // 顶部
-          id={`${id}-top`} // 唯一ID
-          style={{ background: '#000000', width: 8, height: 8 }} // 红色小方块，显眼
-        />
-        {/* ✅ 新增：底部输出锚点（子节点的输出点，连孙子节点） */}
-        <Handle
-          type="source" // 输出锚点（边的起点）
-          position={Position.Bottom} // 底部
-          id={`${id}-bottom`} // 唯一ID
-          style={{ background: '#000000', width: 8, height: 8 }} // 红色小方块，显眼
-        />
+        isConnectable={true}
+      />
+      
+      <Handle
+        type="target"
+        position={Position.Left}
+        id="left-target"
+        style={{ 
+          background: '#FF6B6B',
+          width: 8,
+          height: 8,
+          left: -4,
+          top: '50%',
+          transform: 'translateY(-50%)'
+        }}
+        isConnectable={true}
+      />
+      
+      <Handle
+        type="target"
+        position={Position.Right}
+        id="right-target"
+        style={{ 
+          background: '#4ECDC4',
+          width: 8,
+          height: 8,
+          right: -4,
+          top: '50%',
+          transform: 'translateY(-50%)'
+        }}
+        isConnectable={true}
+      />
+      
+      {editing ? (
         <input
-          type="text"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
+          value={label}
+          onChange={e => setLabel(e.target.value)}
           onBlur={handleConfirm}
-          onKeyDown={(e) => e.key === 'Enter' && handleConfirm()}
+          onKeyDown={e => e.key === 'Enter' && handleConfirm()}
           autoFocus
           style={{
             width: '100%',
             border: 'none',
+            background: 'transparent',
+            color: 'white',
+            textAlign: 'center',
             outline: 'none',
-            backgroundColor: 'transparent',
-            color: 'black',
-            fontSize: '14px',
+            fontSize: 14,
           }}
-          placeholder="输入节点名称"
         />
+      ) : (
+        <div 
+          style={{ 
+            cursor: 'pointer', 
+            width: '100%', 
+            textAlign: 'center',
+            padding: '0 4px',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+          onDoubleClick={() => setEditing(true)}
+          title={label}
+        >
+          {label} <br/> 
+          <small>order:{data.order}</small>
+        </div>
+      )}
+      
+      <div style={{
+        position: 'absolute',
+        top: -20,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        fontSize: 10,
+        color: '#666',
+      }}>
+        L{data.level}-{data.branch[0]}
       </div>
-    );
-  }
-
-  return (
-    <div 
-      style={{
-        backgroundColor: '#FBBC05',
-        color: 'black',
-        borderRadius: '8px',
-        padding: '10px 15px',
-        border: 'none',
-        position: 'relative', // ✅ 新增：锚点需要相对定位
-      }}
-    >
-      {/* ✅ 新增：顶部输入锚点 */}
-      <Handle
-        type="target"
-        position={Position.Top}
-        id={`${id}-top`}
-        style={{ background: '#000000', width: 8, height: 8 }}
-      />
-      {/* ✅ 新增：底部输出锚点 */}
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id={`${id}-bottom`}
-        style={{ background: '#000000', width: 8, height: 8 }}
-      />
-      {inputValue}
     </div>
   );
 };
 
-// 注册自定义节点类型（完全保留你的代码）
-const nodeTypes = {
-  editable: EditableNode,
-};
 
-// 主组件（仅改关键行，其余完全保留）
-const KnowledgeTreeEditor = () => {
-  // 1. 初始树形数据
-  // 移除：const reactFlowInstance = useReactFlow(); （这行是报错核心）
-  // 新增：用ref保存实例（仅加这1行）
-  const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null);
+function addChildNode(
+  parentNode: TreeNode, 
+  tree: TreeNode[], 
+  treeId: string
+): TreeNode[] {
+  const siblings = tree.filter(n => 
+    n.parentId === parentNode.id && 
+    n.level === parentNode.level + 1 &&
+    n.branch === parentNode.branch
+  );
 
-  const treeData: TreeItem[] = [
-    {
-      id: 1,
-      name: '根节点',
-      children: [
-        {
-          id: 2,
-          name: '子节点1',
-          children: [
-            { id: 5, name: '子节点1-1' },
-            { id: 6, name: '子节点1-2' }
-          ]
-        },
-        { id: 3, name: '子节点2' },
-        { id: 4, name: '子节点3' }
-      ]
-    }
-  ];
+  const maxOrder = siblings.length > 0 ? siblings.length : -1;
+  const newOrder = maxOrder + 1;
+  const newNodeId = `node-${Date.now()}`;
+  const defaultLabel = "新节点";
 
-  // 2. 生成初始节点和边（完全保留）
-  const { nodes: initialNodes, edges: initialEdges } = buildTreeNodes(treeData);
-
-  // 3. 管理节点/边状态（完全保留）
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
-
-  // 4. 右键菜单状态（完全保留）
-  const [contextMenu, setContextMenu] = useState<ContextMenuState>({
-    show: false,
+  const newNode: TreeNode = {
+    id: newNodeId,
+    label: defaultLabel,
+    level: parentNode.level + 1,
+    order: newOrder,
+    parentId: parentNode.id,
+    branch: parentNode.branch,
     x: 0,
     y: 0,
-    nodeId: null,
+    tree_id: treeId
+  };
+
+  return [...tree, newNode];
+}
+
+// ========== 辅助函数：删除节点 ==========
+async function deleteNode(nodeId: string, tree: TreeNode[]): Promise<TreeNode[]> {
+  // 1. 收集要删除的节点（自身 + 所有子孙）
+  const toDelete = new Set<string>([nodeId]);
+  let found;
+
+  do {
+    found = false;
+    tree.forEach(node => {
+      if (node.parentId && toDelete.has(node.parentId) && !toDelete.has(node.id)) {
+        toDelete.add(node.id);
+        found = true;
+      }
+    });
+  } while (found);
+
+  // 2. ✅ 修复：遍历要删除的节点，根据 nodeId 删除笔记
+  const nodesToDelete = tree.filter(n => toDelete.has(n.id));
+  for (const node of nodesToDelete) {
+    // 现在是：根据 node.id 删除笔记（正确）
+    await deleteNoteByNodeId(node.id);
+  }
+
+  // 3. 找到被删除节点，更新 兄弟节点的order
+  const deletedNode = tree.find(n => n.id === nodeId);
+  if (!deletedNode) return tree.filter(n => !toDelete.has(n.id));
+
+  const { parentId, order: deletedOrder } = deletedNode;
+  let newTree = tree.filter(node => !toDelete.has(node.id));
+
+  // 4. 兄弟节点 order -1
+  newTree = newTree.map(node => {
+    if (node.parentId === parentId && node.order > deletedOrder) {
+      return { ...node, order: node.order - 1 };
+    }
+    return node;
   });
 
-  // 新增：获取实例的回调（仅加这1个函数）
-  const handleInit = useCallback((instance: ReactFlowInstance) => {
-    reactFlowInstanceRef.current = instance;
-  }, []);
+  return newTree;
+}
 
-  // 5. 左键点击节点（完全保留）
-  const handleNodeClick: OnNodeClick = useCallback((event:any, node:any) => {
-    console.log('跳转到富文本编辑器，节点ID：', node.id, '节点名称：', node.data.label);
-  }, []);
 
-  // 6. 右键点击节点（完全保留）
-  const handleNodeContextMenu: OnNodeContextMenu = useCallback((event:any, node:any) => {
-    event.preventDefault();
+// ========== 主组件 ==========
+const KnowledgeTreeEditor: React.FC = () => {
+  const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null);
+
+  const [treeData, setTreeData] = useState<TreeNode[]>([]); 
+  // 原有状态不变，新增：
+  const [treeId, setTreeId] = useState<string>(''); // 认知树ID
+  const [loading, setLoading] = useState<boolean>(false); // 加载/保存状态
+
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [contextMenu, setContextMenu] = useState<{
+    show: boolean;
+    x: number;
+    y: number;
+    nodeId: string | null;
+  }>({ show: false, x: 0, y: 0, nodeId: null });
+
+
+    const updateTree = useCallback(async (newTree: TreeNode[]) => {
+      const laidOut = layoutTree(newTree);
+      setTreeData(laidOut);
+      setNodes(treeToNodes(laidOut));
+      setEdges(treeToEdges(laidOut));
+
+      // ########## 日志 ##########
+      console.log("=== updateTree 执行 ===");
+      console.log("传入的节点数据:", newTree);
+      const realTreeId = newTree[0]?.tree_id;
+      console.log("获取到 realTreeId =", realTreeId);
+
+      if (realTreeId) {
+        console.log("✅ 开始执行 saveTreeNodes！！！");
+        await saveTreeNodes(realTreeId, laidOut);
+        console.log("✅ saveTreeNodes 执行完成！");
+      } else {
+        console.log("❌ 没有 tree_id，不保存");
+      }
+
+      setTimeout(() => {
+        reactFlowInstanceRef.current?.fitView({ padding: 0.3, duration: 500 });
+      }, 100);
+    }, [setNodes, setEdges]);
+  
+      // ========== 新增：从数据库加载/初始化认知树 ==========
+    // 1. 第一步：只获取 treeId
+    useEffect(() => {
+      const initId = async () => {
+        const tid = await getOrCreateDefaultTree();
+        setTreeId(tid);
+      };
+      initId();
+    }, []);
+
+    // 2. 第二步：等 treeId 有值了，再执行初始化 ✅
+    useEffect(() => {
+      if (!treeId) return; // 等待 treeId 就绪
+
+      const initTree = async () => {
+        setLoading(true);
+        try {
+          const loadedNodes = await loadTreeNodes(treeId);
+
+          if (loadedNodes.length > 0) {
+            await updateTree(loadedNodes);
+          } else {
+            const rootId = `node_${Date.now()}`;
+            const initialTreeData : TreeNode[] = [
+              {
+                id: rootId,
+                label: "根节点",
+                level: 0,
+                order: 0,
+                parentId: null,
+                branch: "left" as const,
+                x: 0,
+                y: 0,
+                tree_id: treeId,
+              },
+            ];
+
+            // ✅ 现在 treeId 一定存在
+            await updateTree(initialTreeData);
+
+            // ✅ 节点已保存 → 笔记创建成功
+            await createNote("根节点", rootId);
+          }
+        } catch (e) {
+          console.error("初始化失败", e);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      initTree();
+    }, [treeId, updateTree]); // 👈 依赖 treeId
+
+
+
+  const handleAddChildNode = useCallback(async () => {
+    if (!contextMenu.nodeId) return;
+
+    const parentNode = treeData.find(n => n.id === contextMenu.nodeId);
+    if (!parentNode) return;
+
+    try {
+      // 1. 生成新节点结构
+      const newTree = await addChildNode(parentNode, treeData, treeId);
+
+      // 2. ✅ 先保存节点到数据库（必须第一步）
+      await updateTree(newTree);
+
+      // 3. ✅ 找到刚生成的新节点
+      const newNode = newTree.find(n => n.parentId === parentNode.id);
+      if (!newNode) return;
+
+      // 4. ✅ 节点已存在 → 创建笔记
+      await createNote(newNode.label, newNode.id);
+
+      setContextMenu({ show: false, x: 0, y: 0, nodeId: null });
+    } catch (e) {
+      console.error("添加子节点失败：", e);
+    }
+  }, [contextMenu, treeData, treeId, updateTree]);
+  
+  const handleDeleteNode = useCallback( async () => {
+    if (!contextMenu.nodeId) return;
+    
+    const newTree = await deleteNode(contextMenu.nodeId, treeData);
+    await updateTree(newTree);
+    setContextMenu({ show: false, x: 0, y: 0, nodeId: null });
+  }, [contextMenu, treeData, updateTree]);
+
+  // 在handleDeleteNode之后，handleNodeContextMenu之前添加：
+  const handleSaveTree = async () => {
+    if (!treeId || loading) return;
+
+    console.log("👉 点击保存，当前 treeData 长度 =", treeData.length);
+
+    setLoading(true);
+    try {
+      await saveTreeNodes(treeId, treeData);
+      alert('认知树保存成功！');
+    } catch (e) {
+      console.error("保存失败", e);
+      alert('保存失败：' + (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const handleNodeContextMenu = useCallback((e:any, node:any) => {
+    e.preventDefault();
     setContextMenu({
       show: true,
-      x: event.clientX,
-      y: event.clientY,
+      x: e.clientX,
+      y: e.clientY,
       nodeId: node.id,
     });
   }, []);
-
-  // 7. 点击空白处关闭右键菜单（完全保留）
-  const handleClickOutside = useCallback((event: MouseEvent) => {
-    if (contextMenu.show) {
-      setContextMenu({ ...contextMenu, show: false });
-    }
-  }, [contextMenu.show]);
-
-  // 8. 新建子节点（仅改fitView相关行，其余保留）
-const handleAddChildNode = useCallback(() => {
-  if (!contextMenu.nodeId) return;
-
-  setContextMenu({ ...contextMenu, show: false });
-
-  const newNodeId = `node-${Date.now()}`;
-  const parentNode = nodes.find((n) => n.id === contextMenu.nodeId);
-  if (!parentNode) return;
-
-  const childX = parentNode.position.x;
-  const childY = parentNode.position.y + 100;
-
-  const newNode: Node = {
-    id: newNodeId,
-    type: 'editable',
-    data: { label: '新节点' },
-    position: { x: childX, y: childY },
-    draggable: false,
-  };
-
-  const newEdge: Edge = {
-    id: `edge-${contextMenu.nodeId}-${newNodeId}`,
-    source: contextMenu.nodeId,
-    target: newNodeId,
-    type: 'smoothstep',
-    style: { stroke: '#000000', strokeWidth: 3 },
-  };
-
-  // ✅ 新增：打印要添加的边（看source/target是否正确）
-  console.log('要添加的新边：', newEdge);
   
-  setNodes((prev) => [...prev, newNode]);
-  setEdges((prev) => {
-    // ✅ 新增：打印更新后的edges数组（看是否包含新边）
-    const newEdges = [...prev, newEdge];
-    console.log('更新后的所有边：', newEdges);
-    return newEdges;
-  });
-
-  if (reactFlowInstanceRef.current) {
-    setTimeout(() => {
-      reactFlowInstanceRef.current!.fitView({ padding: 0.2 });
-    }, 50);
-  }
-
-  const handleNodeNameUpdate = (e: any) => {
-    if (e.detail.nodeId === newNodeId) {
-      setNodes((prev) =>
-        prev.map((node) =>
-          node.id === newNodeId ? { ...node, data: { label: e.detail.name } } : node
-        )
-      );
-      window.removeEventListener('nodeNameUpdated', handleNodeNameUpdate);
-    }
-  };
-  window.addEventListener('nodeNameUpdated', handleNodeNameUpdate);
-
-}, [contextMenu, nodes, setNodes, setEdges]);
-
-  // 9. 删除节点（完全保留）
-  const handleDeleteNode = useCallback(() => {
-    if (!contextMenu.nodeId) return;
-
-    setContextMenu({ ...contextMenu, show: false });
-    setNodes((prev) => prev.filter((node) => node.id !== contextMenu.nodeId));
-    setEdges((prev) =>
-      prev.filter(
-        (edge) => edge.source !== contextMenu.nodeId && edge.target !== contextMenu.nodeId
-      )
-    );
-  }, [contextMenu.nodeId, setNodes, setEdges]);
-
-  // 挂载关闭菜单监听（完全保留）
   useEffect(() => {
-    document.addEventListener('click', handleClickOutside);
-    return () => {
-      document.removeEventListener('click', handleClickOutside);
+    const handleClickOutside = () => {
+      if (contextMenu.show) {
+        setContextMenu({ ...contextMenu, show: false });
+      }
     };
-  }, [handleClickOutside]);
+    
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [contextMenu]);
+  
+  const handleInit = useCallback((instance: ReactFlowInstance) => {
+    reactFlowInstanceRef.current = instance;
+    instance.fitView({ padding: 0.3 });
+  }, []);
 
+  //监听双击节点修改label
+  useEffect(() => {
+      const handleLabelUpdate = async (e: CustomEvent) => {
+        const { nodeId, label } = e.detail;
+
+        // 1. 更新本地树
+        const newTree = treeData.map(node => 
+          node.id === nodeId ? { ...node, label } : node
+        );
+        updateTree(newTree);
+
+        // 2. ✅ 保存到数据库
+        await updateNodeLabel(nodeId, label);
+      };
+      // 解决类型错误
+      const listener = (e: Event) => {
+        handleLabelUpdate(e as unknown as CustomEvent);
+      };
+        window.addEventListener('nodeLabelUpdated', listener);
+        return () => window.removeEventListener('nodeLabelUpdated', listener);
+      }, [treeData, updateTree]);
+  
+  //注册reactflow自定义节点
+  const nodeTypes = useMemo(() => ({ treeNode: TreeNodeComponent }), []);
+  
   return (
     <ReactFlowProvider>
-      <div style={{ width: '100%', height: '800px', border: '1px solid #eee', position: 'relative' }}>
+      <div style={{ width: '100%', height: '100%', position: 'relative' }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
-          onNodeClick={handleNodeClick}
           onNodeContextMenu={handleNodeContextMenu}
-          fitView
-          fitViewOptions={{ padding: 0.2 }}
           nodeTypes={nodeTypes}
-          draggable={false}
-          onInit={handleInit} // 仅新增这1行（获取实例）
+          fitView
+          onInit={handleInit}
+          style={{ background: '#f8f9fa' }}
         >
-          <Background color="#f0f0f0" gap={20} />
+          <Background color="#e9ecef" gap={20}  />
           <Controls />
+          <MiniMap
+              nodeColor={(node) => {
+                // 自定义小地图节点颜色（可选，按分支区分）
+                return node.data.branch === 'left' ? '#4285F4' : '#34A853';
+              }}
+              nodeStrokeWidth={2}
+              style={{ 
+                position: 'absolute', 
+                bottom: 16, 
+                right: 16, 
+                width: 200, 
+                height: 150,
+                borderRadius: 8,
+                boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+              }}
+          />  
         </ReactFlow>
-
-        {/* 右键菜单（完全保留） */}
+        
         {contextMenu.show && (
           <div
             style={{
               position: 'fixed',
               top: contextMenu.y,
               left: contextMenu.x,
-              backgroundColor: 'white',
-              borderRadius: '4px',
-              boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+              background: 'white',
+              borderRadius: 4,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
               padding: '8px 0',
-              width: '120px',
               zIndex: 9999,
+              minWidth: 120,
             }}
           >
             <div
-              style={{
-                padding: '8px 16px',
-                cursor: 'pointer',
-                fontSize: '14px',
-              }}
-              onMouseEnter={(e) => (e.target as HTMLElement).style.backgroundColor = '#f5f5f5'}
-              onMouseLeave={(e) => (e.target as HTMLElement).style.backgroundColor = 'white'}
+              style={{ padding: '8px 16px', cursor: 'pointer' }}
               onClick={handleAddChildNode}
+              onMouseEnter={e => e.currentTarget.style.background = '#f5f5f5'}
+              onMouseLeave={e => e.currentTarget.style.background = 'white'}
             >
-              新建子节点
+              新增子节点
             </div>
             <div
-              style={{
-                padding: '8px 16px',
+              style={{ 
+                padding: '8px 16px', 
                 cursor: 'pointer',
-                fontSize: '14px',
-                color: '#ff0000',
+                color: '#ff4444',
+                borderTop: '1px solid #eee',
               }}
-              onMouseEnter={(e) => (e.target as HTMLElement).style.backgroundColor = '#f5f5f5'}
-              onMouseLeave={(e) => (e.target as HTMLElement).style.backgroundColor = 'white'}
               onClick={handleDeleteNode}
+              onMouseEnter={e => e.currentTarget.style.background = '#f5f5f5'}
+              onMouseLeave={e => e.currentTarget.style.background = 'white'}
             >
-              删除该节点
+              删除节点
             </div>
           </div>
         )}
+
+                // 在主组件return的div中，新增保存按钮（放在contextMenu下方）：
+        {/* 保存按钮 */}
+        <div style={{
+          position: 'absolute',
+          top: 10,
+          right: 10,
+          zIndex: 5,
+        }}>
+          <button
+            onClick={handleSaveTree}
+            disabled={loading}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: loading ? '#ccc' : '#4285F4',
+              color: 'white',
+              border: 'none',
+              borderRadius: 4,
+              cursor: loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {loading ? '保存中...' : '保存认知树'}
+          </button>
+        </div>
+        
+        <div style={{
+          position: 'absolute',
+          top: 10,
+          left: 10,
+          background: 'white',
+          padding: 12,
+          borderRadius: 6,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+          zIndex: 5,
+          fontSize: 13,
+          maxWidth: 300,
+        }}>
+          <div><strong>✅ 认知树笔记本</strong></div>
+          <div style={{ marginTop: 8 }}>
+            1.这不是传统的笔记本，这是认知构建工具<br/>
+            2. 结构：领域 -》 认知节点 -》 笔记<br/>
+            3. 解决知识越存越乱，找不到关联，找不到重点，复习成本极高，无法形成体系的困难<br/>
+            4. 马斯克：把知识看成一棵树，理解即是记忆，增加10倍记忆，增加跨领域创造能力
+          </div>
+        </div>
       </div>
     </ReactFlowProvider>
   );
