@@ -15,32 +15,41 @@ export default function NoteEditor({ nodeId }: NoteEditorProps) {
     if (!nodeId) {
       setContent('');
       setTitle('');
-     ;
       return;
     }
+
+    // 🔥 安全加载：出错绝不崩溃
     const load = async () => {
-      const note = await getNoteByNodeId(nodeId);
-      if (note) {
-        setTitle(note.title);
-        setContent(note.content);
+      try {
+        const note = await getNoteByNodeId(nodeId);
+        if (note) {
+          setTitle(note.title || '');
+          setContent(note.content || '');
+        } else {
+          setTitle('');
+          setContent('');
+        }
+      } catch (err) {
+        console.error('加载笔记失败', err);
+        // 🔥 崩溃时清空，不卡住
+        setTitle('');
+        setContent('');
       }
     };
+
     load();
   }, [nodeId]);
 
-  // 🔥 修复好的保存逻辑，永远不会卡住
   const handleSave = async () => {
     if (!nodeId) return;
     setSaving(true);
-
     try {
       await saveNote(nodeId, title || '无标题', content);
       alert('保存成功');
     } catch (err) {
       console.error('保存失败', err);
-      alert('保存失败：数据库或网络错误');
+      alert('保存失败');
     }
-
     setSaving(false);
   };
 
