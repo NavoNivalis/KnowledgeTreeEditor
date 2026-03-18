@@ -1,6 +1,6 @@
 'use client';
 
-import KnowledgeTreeEditor from '../../components/KnowledgeTreeEditor';
+import KnowledgeTreeEditor from '@/app/components/KnowledgeTreeEditor';
 
 export default function TreePage() {
   return (

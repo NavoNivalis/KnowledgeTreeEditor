@@ -4,13 +4,13 @@ import { useState, useEffect, useRef } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Plus, Folder, Brain, ChevronLeft, ChevronRight, Trash2, Edit3 } from 'lucide-react';
+import { createClientSupabase } from '@/app/lib/supabase-client'
 
 import { 
   getUserTrees, 
   createTree, 
   deleteTree, 
   updateTreeTitle,
-  initTreeRootNode
 } from '../hooks/database';
 
 export default function Sidebar() {
@@ -44,7 +44,13 @@ export default function Sidebar() {
 
   const iconContainerClass = "w-6 h-6 flex items-center justify-center flex-shrink-0";
   const itemBaseClass = "w-full flex items-center gap-2 p-2 rounded text-sm hover:bg-gray-800 cursor-pointer transition-colors";
-
+  
+  //登出功能
+    const handleLogout = async () => {
+    await createClientSupabase().auth.signOut()
+    router.push('/login')
+    router.refresh()
+  }
   // ========== 加载树列表 ==========
   const loadTrees = async () => {
     console.log("=== loadTrees 执行 ===");
@@ -209,6 +215,9 @@ const handleCreateTree = async () => {
 
       {/* 树列表 */}
       <div className="p-3 overflow-y-auto max-h-[calc(100vh-220px)]">
+        <button onClick={handleLogout} className="mt-auto text-sm text-gray-500">
+        退出登录
+      </button>
         <div className="space-y-1">
           {loading ? (
             <div className="text-gray-500 text-sm p-2">加载中...</div>
